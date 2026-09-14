@@ -128,6 +128,7 @@ export const FRAME_MARGIN = 0.18;
 export const WALL_TILE = 0.55;
 export const CORNER_SIZE = 0.55;
 export const ANGLE_SIZE = 0.45;
+export const OPENING_EDGE_CLEARANCE = CORNER_SIZE + FRAME_MARGIN;
 export const FRAME_DEPTH = 0.18;
 export const FRAME_THICKNESS = 0.07;
 export const WINDOW_GLASS_TINT = 0.32;
@@ -397,12 +398,12 @@ function mountedWorldSize(face: Face, localSize: Vec3): Vec3 {
   return { ...localSize };
 }
 
-function interiorCandidateValid(layout: ShipLayout, room: Room, center: Vec3, size: Vec3, rotation = 0, wallFace?: Face): boolean {
+function interiorCandidateValid(layout: ShipLayout, room: Room, center: Vec3, size: Vec3, rotation = 0, wallFace?: Face, ignoreId?: string): boolean {
   const bounds = boundsFromCenter(center, size, rotation);
   if (!wallFace && !insideRoom(bounds, room)) return false;
   if (layout.openings.some(opening => (opening.roomId === room.id || opening.otherRoomId === room.id) && boundsOverlap(bounds, openingBounds(opening)))) return false;
   const occupied = [...layout.furniture.filter(item => item.roomId === room.id), ...layout.interior.filter(item => item.roomId === room.id)];
-  return !occupied.some(item => boundsOverlap(bounds, boundsFromCenter(item.center, item.size, 'rotation' in item ? item.rotation : 0), 0.04));
+  return !occupied.some(item => item.id !== ignoreId && boundsOverlap(bounds, boundsFromCenter(item.center, item.size, 'rotation' in item ? item.rotation : 0), 0.12));
 }
 
 function subtractRect(rects: Rect[], block: Rect): Rect[] {
@@ -431,12 +432,12 @@ export function placeOpening(layout: ShipLayout, roomId: string, face: Face, typ
   const u1 = Math.min(room.min[u] + room.size[u], neighbor ? neighbor.min[u] + neighbor.size[u] : Infinity);
   const v0 = Math.max(room.min[v], neighbor?.min[v] ?? -Infinity);
   const v1 = Math.min(room.min[v] + room.size[v], neighbor ? neighbor.min[v] + neighbor.size[v] : Infinity);
-  const wallMargin = !horizontal ? FRAME_MARGIN : 0;
-  const w = Math.min(requestedWidth, u1 - u0 - FRAME_MARGIN * 2);
+  const wallMargin = OPENING_EDGE_CLEARANCE;
+  const w = Math.min(requestedWidth, u1 - u0 - wallMargin * 2);
   const h = Math.min(requestedHeight, v1 - v0 - wallMargin * 2);
   if (w < 0.65 || h < 0.65) return null;
-  const sill = !horizontal && type !== 'window' ? wallMargin : FRAME_MARGIN;
-  let regions: Rect[] = [{ u0: u0 + w / 2 + FRAME_MARGIN, u1: u1 - w / 2 - FRAME_MARGIN, v0: v0 + h / 2 + sill, v1: !horizontal && type !== 'window' ? v0 + h / 2 : v1 - h / 2 - wallMargin }];
+  const sill = !horizontal && type !== 'window' ? wallMargin : wallMargin;
+  let regions: Rect[] = [{ u0: u0 + w / 2 + wallMargin, u1: u1 - w / 2 - wallMargin, v0: v0 + h / 2 + sill, v1: !horizontal && type !== 'window' ? v0 + h / 2 + sill : v1 - h / 2 - wallMargin }];
   if (regions[0].u1 < regions[0].u0 || regions[0].v1 < regions[0].v0) return null;
   for (const existing of openingsOnFace(layout, room, face)) {
     regions = subtractRect(regions, {
@@ -444,6 +445,21 @@ export function placeOpening(layout: ShipLayout, roomId: string, face: Face, typ
       u1: existing.center[u] + (existing.width + w) / 2 + FRAME_MARGIN,
       v0: existing.center[v] - (existing.height + h) / 2 - FRAME_MARGIN,
       v1: existing.center[v] + (existing.height + h) / 2 + FRAME_MARGIN,
+    });
+  }
+  const plane = faceCenter(room, face)[normal];
+  const blockers = [
+    ...layout.furniture.filter(item => item.roomId === room.id).map(item => boundsFromCenter(item.center, item.size)),
+    ...layout.interior.filter(item => item.roomId === room.id).map(item => boundsFromCenter(item.center, item.size, item.rotation)),
+    ...layout.exterior.filter(item => item.roomId === room.id).map(item => boundsFromCenter(item.center, mountedWorldSize(item.face, item.size))),
+  ];
+  for (const bounds of blockers) {
+    if (plane < bounds.min[normal] - FRAME_MARGIN || plane > bounds.max[normal] + FRAME_MARGIN) continue;
+    regions = subtractRect(regions, {
+      u0: bounds.min[u] - w / 2 - FRAME_MARGIN,
+      u1: bounds.max[u] + w / 2 + FRAME_MARGIN,
+      v0: bounds.min[v] - h / 2 - FRAME_MARGIN,
+      v1: bounds.max[v] + h / 2 + FRAME_MARGIN,
     });
   }
   if (!regions.length) return null;
@@ -602,8 +618,15 @@ function recursiveInterior(layout: ShipLayout, room: Room, rng: () => number, on
   const objects: InteriorObject[] = [];
   const placed: InteriorObject[] = [];
   const add = (kind: InteriorObjectKind, center: Vec3, size: Vec3, parentId?: string, rotation = 0, wallFace?: Face) => {
-    if (!parentId && !interiorCandidateValid({ ...layout, interior: [...layout.interior, ...placed] }, room, center, size, rotation, wallFace)) return null;
-    const object: InteriorObject = { id: `I-${layout.nextId++}`, roomId: room.id, kind, parentId, center: { ...center }, size, rotation, seed: layout.seed };
+    const placedCenter = { ...center };
+    if (wallFace) {
+      const { normal, sign } = faceAxes(wallFace);
+      const worldSize = boundsFromCenter({ x: 0, y: 0, z: 0 }, size, rotation);
+      const depth = worldSize.max[normal] - worldSize.min[normal];
+      placedCenter[normal] -= sign * (depth / 2 + 0.015);
+    }
+    if (!interiorCandidateValid({ ...layout, interior: [...layout.interior, ...placed] }, room, placedCenter, size, rotation, wallFace, parentId)) return null;
+    const object: InteriorObject = { id: `I-${layout.nextId++}`, roomId: room.id, kind, parentId, center: placedCenter, size, rotation, seed: layout.seed };
     objects.push(object);
     placed.push(object);
     return object;
@@ -728,10 +751,12 @@ function populateExterior(layout: ShipLayout, config: RuleConfig, rng: () => num
           const axis: Axis = (face as string) === 'east' || (face as string) === 'west' ? 'z' : 'x';
           center[axis] = room.min[axis] + 0.5 + rng() * (room.size[axis] - 1);
         }
-        const { normal, sign } = faceAxes(face);
+        const { normal, u, v, sign } = faceAxes(face);
         center[normal] += sign * size.y / 2;
         const candidate: ExteriorObject = { id: `X-${layout.nextId}`, roomId: room.id, kind, face, center, size, rotation: rng() * Math.PI * 2, seed: layout.seed };
-        const candidateBounds = boundsFromCenter(center, mountedWorldSize(face, size));
+        const worldSize = mountedWorldSize(face, size);
+        const candidateBounds = boundsFromCenter(center, worldSize);
+        if (candidateBounds.min[u] < room.min[u] + FRAME_MARGIN || candidateBounds.max[u] > room.min[u] + room.size[u] - FRAME_MARGIN || candidateBounds.min[v] < room.min[v] + FRAME_MARGIN || candidateBounds.max[v] > room.min[v] + room.size[v] - FRAME_MARGIN) continue;
         if (layout.openings.some(opening => boundsOverlap(candidateBounds, openingBounds(opening, 1.2)))) continue;
         if (layout.exterior.some(other => boundsOverlap(candidateBounds, boundsFromCenter(other.center, mountedWorldSize(other.face, other.size)), 0.15))) continue;
         layout.nextId++;
@@ -744,11 +769,15 @@ function populateExterior(layout: ShipLayout, config: RuleConfig, rng: () => num
 
 function exteriorSize(kind: ExteriorObjectKind): Vec3 {
   switch (kind) {
+    case 'turret': return { x: 0.9, y: 1.05, z: 2.2 };
     case 'antenna': return { x: 0.65, y: 2.4, z: 0.65 };
     case 'thruster': return { x: 1.35, y: 1.8, z: 1.35 };
     case 'landingGear': return { x: 0.9, y: 2.1, z: 0.75 };
     case 'dockingPort': return { x: 1.15, y: 0.45, z: 1.15 };
     case 'heatSink': return { x: 1.2, y: 0.35, z: 0.8 };
+    case 'cargoHook': return { x: 0.5, y: 1.25, z: 0.5 };
+    case 'sensorPod': return { x: 0.65, y: 0.85, z: 0.65 };
+    case 'lifeSupport': return { x: 0.65, y: 0.75, z: 0.55 };
     default: return { x: 0.8, y: 0.9, z: 0.8 };
   }
 }
@@ -848,7 +877,6 @@ export function tileWall(layout: ShipLayout, room: Room, face: Face, thickness: 
   const openings = openingsOnFace(layout, room, face);
   const width = room.size[u];
   const height = room.size[v];
-  const edge = Math.min(CORNER_SIZE, width / 3, height / 3);
   const baseCenter = faceCenter(room, face);
   const panel = (cu: number, cv: number, su: number, sv: number, st = thickness): Panel => {
     const center: Vec3 = { ...baseCenter };
@@ -876,20 +904,15 @@ export function tileWall(layout: ShipLayout, room: Room, face: Face, thickness: 
       v1: Math.min(height, neighbor.min[v] + neighbor.size[v] - room.min[v]),
     });
   }
-  const tileSize = WALL_TILE;
   for (const region of regions) {
     if (region.u1 - region.u0 < 0.18 || region.v1 - region.v0 < 0.18) continue;
-    const cols = Math.max(1, Math.round((region.u1 - region.u0) / tileSize));
-    const rows = Math.max(1, Math.round((region.v1 - region.v0) / tileSize));
-    const stepU = (region.u1 - region.u0) / cols;
-    const stepV = (region.v1 - region.v0) / rows;
-    for (let i = 0; i < cols; i++) for (let j = 0; j < rows; j++) {
-      const cu = region.u0 + stepU * (i + 0.5), cv = region.v0 + stepV * (j + 0.5);
-      const touchesU = cu < edge || cu > width - edge;
-      const touchesV = cv < edge || cv > height - edge;
-      const target = touchesU && touchesV ? corners : touchesU || touchesV ? angles : middles;
-      target.push(panel(cu, cv, stepU, stepV, touchesU && touchesV ? thickness * 1.3 : touchesU || touchesV ? thickness * 0.95 : thickness));
-    }
+    middles.push(panel(
+      (region.u0 + region.u1) / 2,
+      (region.v0 + region.v1) / 2,
+      region.u1 - region.u0,
+      region.v1 - region.v0,
+      thickness,
+    ));
   }
   const isFloorLike = (face as Face) === 'floor';
   for (const neighbor of partialFaceNeighbors(layout, room, face)) {
@@ -1006,11 +1029,21 @@ export function validateLayout(layout: ShipLayout, params: GeneratorParams): str
       const { normal, u, v } = faceAxes(opening.face);
       if (Math.abs(opening.center[normal] - room.min[normal]) > EPS && Math.abs(opening.center[normal] - room.min[normal] - room.size[normal]) > EPS) errors.push(`${opening.id}: detached from parent face`);
       if (opening.center[u] - opening.width / 2 < room.min[u] - EPS || opening.center[u] + opening.width / 2 > room.min[u] + room.size[u] + EPS || opening.center[v] - opening.height / 2 < room.min[v] - EPS || opening.center[v] + opening.height / 2 > room.min[v] + room.size[v] + EPS) errors.push(`${opening.id}: outside parent bounds`);
+      if (opening.center[u] - opening.width / 2 < room.min[u] + OPENING_EDGE_CLEARANCE - EPS || opening.center[u] + opening.width / 2 > room.min[u] + room.size[u] - OPENING_EDGE_CLEARANCE + EPS || opening.center[v] - opening.height / 2 < room.min[v] + OPENING_EDGE_CLEARANCE - EPS || opening.center[v] + opening.height / 2 > room.min[v] + room.size[v] - OPENING_EDGE_CLEARANCE + EPS) errors.push(`${opening.id}: violates structural edge clearance`);
     }
   }
   for (const object of layout.interior) {
     const room = layout.rooms.find(r => r.id === object.roomId);
     if (!room) errors.push(`${object.id}: missing parent`);
+  }
+  const interiorItems = [
+    ...layout.furniture.map(item => ({ ...item, rotation: 0, parentId: undefined as string | undefined })),
+    ...layout.interior,
+  ];
+  for (let i = 0; i < interiorItems.length; i++) for (let j = i + 1; j < interiorItems.length; j++) {
+    const a = interiorItems[i], b = interiorItems[j];
+    if (a.roomId !== b.roomId || a.parentId === b.id || b.parentId === a.id) continue;
+    if (boundsOverlap(boundsFromCenter(a.center, a.size, a.rotation), boundsFromCenter(b.center, b.size, b.rotation))) errors.push(`${a.id} overlaps ${b.id}`);
   }
   for (let i = 0; i < layout.exterior.length; i++) {
     const object = layout.exterior[i];

@@ -21,14 +21,14 @@ import {
 type Tab = 'workspace' | 'rules' | 'geometry';
 type Toast = { id: number; message: string; tone: 'success' | 'info' };
 interface SavedWorkspace { layout: ShipLayout; params: GeneratorParams; rules: RuleConfig; name: string }
-const STORAGE_KEY = 'orbital-shipyard-workspace-v3';
+const STORAGE_KEY = 'orbital-shipyard-workspace-v4';
 const DEFAULT_OPTIONS: SceneOptions = {
-  mode: 'gizmos', cutaway: true, showGrid: true, showLabels: true,
+  mode: 'solid', cutaway: true, showGrid: false, showLabels: true,
   showInterior: true, showExterior: true,
   showCorners: true, showAngles: true, showPanels: true, showJunctions: true, showFrames: true,
   showGlass: true, showDoors: true, showAirlocks: true,
   showFurniture: true, showMounts: true,
-  showSubdivisions: true, thickness: 0.12,
+  showSubdivisions: false, thickness: 0.12,
 };
 
 function loadWorkspace(): SavedWorkspace {

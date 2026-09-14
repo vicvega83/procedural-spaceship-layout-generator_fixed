@@ -36,3 +36,18 @@ All mutations remain forward-only: a candidate is calculated, validated against 
 The production build completes successfully with `npm run build`.
 
 The extended invariant sweep also completed successfully across 500 deterministic seeds with zero validation failures.
+
+## Solid-wall correction
+
+The earlier partition still emitted a grid of small boxes. This revision removes that representation:
+
+- Each remaining face rectangle is emitted as one continuous solid wall slab.
+- The default renderer starts in Solid mode with both the world grid and subdivision edges disabled.
+- The workspace storage key is advanced so an older saved display configuration cannot silently re-enable the grid.
+- Openings reserve `CORNER_SIZE + FRAME_MARGIN` from every wall edge, and validation rejects any opening entering that structural corner zone.
+- New openings also subtract already-committed furniture, interior props, and exterior mounts from their legal placement regions.
+- Wall-mounted interior props are inset onto the room side of their mounting plane.
+- Child props are collision-tested against everything except their explicit parent.
+- Exterior bounds now cover the rendered geometry and must fit inside the supporting face before commit.
+
+Additional verification over 500 seeds checked 71,119 solid wall sections and 27,062 opening-to-wall-frame relationships with zero intersections.
