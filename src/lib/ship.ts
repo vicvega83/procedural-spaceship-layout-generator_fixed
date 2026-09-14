@@ -65,6 +65,7 @@ export interface ExteriorObject {
   id: string;
   roomId: string;
   kind: ExteriorObjectKind;
+  face: Face;
   center: Vec3;
   size: Vec3;
   rotation: number;
@@ -360,6 +361,50 @@ export function openingsOnFace(layout: ShipLayout, room: Room, face: Face): Open
 
 interface Rect { u0: number; u1: number; v0: number; v1: number }
 
+interface Bounds3 { min: Vec3; max: Vec3 }
+
+function boundsFromCenter(center: Vec3, size: Vec3, rotation = 0): Bounds3 {
+  const quarterTurn = Math.abs(Math.sin(rotation)) > 0.707;
+  const sx = quarterTurn ? size.z : size.x;
+  const sz = quarterTurn ? size.x : size.z;
+  return {
+    min: { x: center.x - sx / 2, y: center.y - size.y / 2, z: center.z - sz / 2 },
+    max: { x: center.x + sx / 2, y: center.y + size.y / 2, z: center.z + sz / 2 },
+  };
+}
+
+function boundsOverlap(a: Bounds3, b: Bounds3, clearance = 0): boolean {
+  return (['x', 'y', 'z'] as Axis[]).every(axis => a.min[axis] < b.max[axis] + clearance - EPS && a.max[axis] > b.min[axis] - clearance + EPS);
+}
+
+function insideRoom(bounds: Bounds3, room: Room, inset = 0.08): boolean {
+  return (['x', 'y', 'z'] as Axis[]).every(axis => bounds.min[axis] >= room.min[axis] + inset - EPS && bounds.max[axis] <= room.min[axis] + room.size[axis] - inset + EPS);
+}
+
+function openingBounds(opening: Opening, depth = 0.7): Bounds3 {
+  const { normal, u, v } = faceAxes(opening.face);
+  const size: Vec3 = { x: depth, y: depth, z: depth };
+  size[u] = opening.width + FRAME_MARGIN * 2;
+  size[v] = opening.height + FRAME_MARGIN * 2;
+  size[normal] = depth;
+  return boundsFromCenter(opening.center, size);
+}
+
+function mountedWorldSize(face: Face, localSize: Vec3): Vec3 {
+  const { normal } = faceAxes(face);
+  if (normal === 'x') return { x: localSize.y, y: localSize.x, z: localSize.z };
+  if (normal === 'z') return { x: localSize.x, y: localSize.z, z: localSize.y };
+  return { ...localSize };
+}
+
+function interiorCandidateValid(layout: ShipLayout, room: Room, center: Vec3, size: Vec3, rotation = 0, wallFace?: Face): boolean {
+  const bounds = boundsFromCenter(center, size, rotation);
+  if (!wallFace && !insideRoom(bounds, room)) return false;
+  if (layout.openings.some(opening => (opening.roomId === room.id || opening.otherRoomId === room.id) && boundsOverlap(bounds, openingBounds(opening)))) return false;
+  const occupied = [...layout.furniture.filter(item => item.roomId === room.id), ...layout.interior.filter(item => item.roomId === room.id)];
+  return !occupied.some(item => boundsOverlap(bounds, boundsFromCenter(item.center, item.size, 'rotation' in item ? item.rotation : 0), 0.04));
+}
+
 function subtractRect(rects: Rect[], block: Rect): Rect[] {
   return rects.flatMap(r => {
     if (block.u1 <= r.u0 || block.u0 >= r.u1 || block.v1 <= r.v0 || block.v0 >= r.v1) return [r];
@@ -549,14 +594,15 @@ function primaryFurnishings(layout: ShipLayout, room: Room): Furnishing[] {
   center.y = room.min.y + size.y / 2;
   center.z = Math.max(room.min.z + size.z / 2 + 0.1, Math.min(room.min.z + room.size.z - size.z / 2 - 0.1, center.z));
   center.x = Math.max(room.min.x + size.x / 2 + 0.1, Math.min(room.min.x + room.size.x - size.x / 2 - 0.1, center.x));
-  items.push({ id: `F-${layout.nextId++}`, roomId: room.id, type, center, size });
+  if (interiorCandidateValid(layout, room, center, size)) items.push({ id: `F-${layout.nextId++}`, roomId: room.id, type, center, size });
   return items;
 }
 
 function recursiveInterior(layout: ShipLayout, room: Room, rng: () => number, only: RuleKey | undefined, config: RuleConfig): InteriorObject[] {
   const objects: InteriorObject[] = [];
   const placed: InteriorObject[] = [];
-  const add = (kind: InteriorObjectKind, center: Vec3, size: Vec3, parentId?: string, rotation = 0) => {
+  const add = (kind: InteriorObjectKind, center: Vec3, size: Vec3, parentId?: string, rotation = 0, wallFace?: Face) => {
+    if (!parentId && !interiorCandidateValid({ ...layout, interior: [...layout.interior, ...placed] }, room, center, size, rotation, wallFace)) return null;
     const object: InteriorObject = { id: `I-${layout.nextId++}`, roomId: room.id, kind, parentId, center: { ...center }, size, rotation, seed: layout.seed };
     objects.push(object);
     placed.push(object);
@@ -581,15 +627,15 @@ function recursiveInterior(layout: ShipLayout, room: Room, rng: () => number, on
         center[normal] = room.min[normal] + (sign > 0 ? room.size[normal] : 0);
         const r = rng();
         if (room.type === 'quarters' && r < 0.5) {
-          add('poster', center, { x: 0.6, y: 0.45, z: 0.04 }, undefined, faceRotation(face, rng));
+          add('poster', center, { x: 0.6, y: 0.45, z: 0.04 }, undefined, faceRotation(face, rng), face);
         } else if (r < 0.6) {
-          add('shelf', center, { x: 0.8, y: 0.18, z: 0.3 }, undefined, faceRotation(face, rng));
+          add('shelf', center, { x: 0.8, y: 0.18, z: 0.3 }, undefined, faceRotation(face, rng), face);
         } else if (r < 0.75) {
-          add('panel', center, { x: 0.5, y: 0.5, z: 0.06 }, undefined, faceRotation(face, rng));
+          add('panel', center, { x: 0.5, y: 0.5, z: 0.06 }, undefined, faceRotation(face, rng), face);
         } else if (r < 0.85) {
-          add('pipe', center, { x: 0.12, y: 0.12, z: 0.12 }, undefined, faceRotation(face, rng));
+          add('pipe', center, { x: 0.12, y: 0.12, z: 0.12 }, undefined, faceRotation(face, rng), face);
         } else {
-          add('cable', center, { x: 0.1, y: 0.4, z: 0.08 }, undefined, faceRotation(face, rng));
+          add('cable', center, { x: 0.1, y: 0.4, z: 0.08 }, undefined, faceRotation(face, rng), face);
         }
         void openingCount;
       }
@@ -604,7 +650,7 @@ function recursiveInterior(layout: ShipLayout, room: Room, rng: () => number, on
       const r = rng();
       if (r < 0.2) {
         const crate = add('crate', center, { x: 0.7, y: 0.7, z: 0.7 }, undefined, rng() * Math.PI * 2);
-        if (rng() < 0.4) add('crateOpen', { ...center, y: room.min.y + 0.85 }, { x: 0.55, y: 0.18, z: 0.55 }, crate.id);
+        if (crate && rng() < 0.4) add('crateOpen', { ...center, y: room.min.y + 0.85 }, { x: 0.55, y: 0.18, z: 0.55 }, crate.id);
       } else if (r < 0.35) {
         add('crate', center, { x: 0.6 + rng() * 0.3, y: 0.6 + rng() * 0.4, z: 0.6 + rng() * 0.3 });
       } else if (r < 0.5) {
@@ -615,11 +661,11 @@ function recursiveInterior(layout: ShipLayout, room: Room, rng: () => number, on
         const desk = add('desk', center, { x: 1.4, y: 0.75, z: 0.7 }, undefined, rng() * Math.PI * 2);
         const surface: Vec3 = { x: center.x, y: room.min.y + 0.8, z: center.z };
         const offset = (rng() - 0.5) * 0.6;
-        if (rng() < 0.4) add('chair', { x: surface.x + offset, y: room.min.y + 0.45, z: surface.z + 0.5 }, { x: 0.45, y: 0.6, z: 0.45 }, desk.id);
-        if (rng() < 0.35) add('panel', { x: surface.x + offset, y: room.min.y + 1.15, z: surface.z + 0.15 }, { x: 0.45, y: 0.35, z: 0.2 }, desk.id);
-        if (rng() < 0.3) add('crateOpen', { x: surface.x + offset, y: room.min.y + 0.95, z: surface.z + 0.15 }, { x: 0.4, y: 0.18, z: 0.3 }, desk.id);
-        if (rng() < 0.3) add('barrel', { x: surface.x + offset, y: room.min.y + 0.7, z: surface.z + 0.35 }, { x: 0.35, y: 0.55, z: 0.35 }, desk.id);
-        if (rng() < 0.25) add('pipe', { x: surface.x + offset, y: room.min.y + 1.05, z: surface.z + 0.25 }, { x: 0.1, y: 0.1, z: 0.18 }, desk.id);
+        if (desk && rng() < 0.4) add('chair', { x: surface.x + offset, y: room.min.y + 0.45, z: surface.z + 0.5 }, { x: 0.45, y: 0.6, z: 0.45 }, desk.id);
+        if (desk && rng() < 0.35) add('panel', { x: surface.x + offset, y: room.min.y + 1.15, z: surface.z + 0.15 }, { x: 0.45, y: 0.35, z: 0.2 }, desk.id);
+        if (desk && rng() < 0.3) add('crateOpen', { x: surface.x + offset, y: room.min.y + 0.95, z: surface.z + 0.15 }, { x: 0.4, y: 0.18, z: 0.3 }, desk.id);
+        if (desk && rng() < 0.3) add('barrel', { x: surface.x + offset, y: room.min.y + 0.7, z: surface.z + 0.35 }, { x: 0.35, y: 0.55, z: 0.35 }, desk.id);
+        if (desk && rng() < 0.25) add('pipe', { x: surface.x + offset, y: room.min.y + 1.05, z: surface.z + 0.25 }, { x: 0.1, y: 0.1, z: 0.18 }, desk.id);
       } else if (r < 0.85) {
         add('tank', center, { x: 0.7, y: 1.05, z: 0.7 }, undefined, rng() * Math.PI * 2);
       } else {
@@ -673,7 +719,7 @@ function populateExterior(layout: ShipLayout, config: RuleConfig, rng: () => num
         : Math.max(1, Math.floor((room.size.x * room.size.z) / 8));
       for (let s = 0; s < slots && placed < target; s++) {
         if (rng() < 0.45) continue;
-        const size: Vec3 = { x: 0.6, y: 0.6, z: 0.6 };
+        const size = exteriorSize(kind);
         const center: Vec3 = { ...plane };
         if (face === 'floor' || face === 'ceiling') {
           center.x = room.min.x + 0.5 + rng() * (room.size.x - 1);
@@ -682,10 +728,28 @@ function populateExterior(layout: ShipLayout, config: RuleConfig, rng: () => num
           const axis: Axis = (face as string) === 'east' || (face as string) === 'west' ? 'z' : 'x';
           center[axis] = room.min[axis] + 0.5 + rng() * (room.size[axis] - 1);
         }
-        layout.exterior.push({ id: `X-${layout.nextId++}`, roomId: room.id, kind, center, size, rotation: faceRotation(face, rng), seed: layout.seed });
+        const { normal, sign } = faceAxes(face);
+        center[normal] += sign * size.y / 2;
+        const candidate: ExteriorObject = { id: `X-${layout.nextId}`, roomId: room.id, kind, face, center, size, rotation: rng() * Math.PI * 2, seed: layout.seed };
+        const candidateBounds = boundsFromCenter(center, mountedWorldSize(face, size));
+        if (layout.openings.some(opening => boundsOverlap(candidateBounds, openingBounds(opening, 1.2)))) continue;
+        if (layout.exterior.some(other => boundsOverlap(candidateBounds, boundsFromCenter(other.center, mountedWorldSize(other.face, other.size)), 0.15))) continue;
+        layout.nextId++;
+        layout.exterior.push(candidate);
         placed++;
       }
     }
+  }
+}
+
+function exteriorSize(kind: ExteriorObjectKind): Vec3 {
+  switch (kind) {
+    case 'antenna': return { x: 0.65, y: 2.4, z: 0.65 };
+    case 'thruster': return { x: 1.35, y: 1.8, z: 1.35 };
+    case 'landingGear': return { x: 0.9, y: 2.1, z: 0.75 };
+    case 'dockingPort': return { x: 1.15, y: 0.45, z: 1.15 };
+    case 'heatSink': return { x: 1.2, y: 0.35, z: 0.8 };
+    default: return { x: 0.8, y: 0.9, z: 0.8 };
   }
 }
 
@@ -784,8 +848,7 @@ export function tileWall(layout: ShipLayout, room: Room, face: Face, thickness: 
   const openings = openingsOnFace(layout, room, face);
   const width = room.size[u];
   const height = room.size[v];
-  const corner = Math.min(CORNER_SIZE, width / 2, height / 2);
-  const angle = Math.min(ANGLE_SIZE, (width - corner * 2) / 2, (height - corner * 2) / 2);
+  const edge = Math.min(CORNER_SIZE, width / 3, height / 3);
   const baseCenter = faceCenter(room, face);
   const panel = (cu: number, cv: number, su: number, sv: number, st = thickness): Panel => {
     const center: Vec3 = { ...baseCenter };
@@ -799,20 +862,19 @@ export function tileWall(layout: ShipLayout, room: Room, face: Face, thickness: 
   const angles: Panel[] = [];
   const middles: Panel[] = [];
   const junctions: Panel[] = [];
-  const cornerDepth = thickness * 1.3;
-  corners.push(panel(corner / 2, corner / 2, corner, corner, cornerDepth));
-  corners.push(panel(width - corner / 2, corner / 2, corner, corner, cornerDepth));
-  corners.push(panel(corner / 2, height - corner / 2, corner, corner, cornerDepth));
-  corners.push(panel(width - corner / 2, height - corner / 2, corner, corner, cornerDepth));
-  const angleDepth = thickness * 0.95;
-  angles.push(panel(width / 2, angle / 2, Math.max(0.001, width - corner * 2), angle, angleDepth));
-  angles.push(panel(width / 2, height - angle / 2, Math.max(0.001, width - corner * 2), angle, angleDepth));
-  angles.push(panel(angle / 2, height / 2, angle, Math.max(0.001, height - corner * 2), angleDepth));
-  angles.push(panel(width - angle / 2, height / 2, angle, Math.max(0.001, height - corner * 2), angleDepth));
-  let regions: Rect[] = [{ u0: corner + angle, u1: width - corner - angle, v0: corner + angle, v1: height - corner - angle }];
-  if (regions[0].u1 < regions[0].u0 || regions[0].v1 < regions[0].v0) regions = [];
+  let regions: Rect[] = [{ u0: 0, u1: width, v0: 0, v1: height }];
   for (const opening of openings) {
-    regions = subtractRect(regions, { u0: opening.center[u] - room.min[u] - opening.width / 2, u1: opening.center[u] - room.min[u] + opening.width / 2, v0: opening.center[v] - room.min[v] - opening.height / 2, v1: opening.center[v] - room.min[v] + opening.height / 2 });
+    const clearance = FRAME_THICKNESS * 1.5;
+    regions = subtractRect(regions, { u0: opening.center[u] - room.min[u] - opening.width / 2 - clearance, u1: opening.center[u] - room.min[u] + opening.width / 2 + clearance, v0: opening.center[v] - room.min[v] - opening.height / 2 - clearance, v1: opening.center[v] - room.min[v] + opening.height / 2 + clearance });
+  }
+  for (const neighbor of partialFaceNeighbors(layout, room, face)) {
+    if (room.id < neighbor.id) continue;
+    regions = subtractRect(regions, {
+      u0: Math.max(0, neighbor.min[u] - room.min[u]),
+      u1: Math.min(width, neighbor.min[u] + neighbor.size[u] - room.min[u]),
+      v0: Math.max(0, neighbor.min[v] - room.min[v]),
+      v1: Math.min(height, neighbor.min[v] + neighbor.size[v] - room.min[v]),
+    });
   }
   const tileSize = WALL_TILE;
   for (const region of regions) {
@@ -821,7 +883,13 @@ export function tileWall(layout: ShipLayout, room: Room, face: Face, thickness: 
     const rows = Math.max(1, Math.round((region.v1 - region.v0) / tileSize));
     const stepU = (region.u1 - region.u0) / cols;
     const stepV = (region.v1 - region.v0) / rows;
-    for (let i = 0; i < cols; i++) for (let j = 0; j < rows; j++) middles.push(panel(region.u0 + stepU * (i + 0.5), region.v0 + stepV * (j + 0.5), stepU, stepV));
+    for (let i = 0; i < cols; i++) for (let j = 0; j < rows; j++) {
+      const cu = region.u0 + stepU * (i + 0.5), cv = region.v0 + stepV * (j + 0.5);
+      const touchesU = cu < edge || cu > width - edge;
+      const touchesV = cv < edge || cv > height - edge;
+      const target = touchesU && touchesV ? corners : touchesU || touchesV ? angles : middles;
+      target.push(panel(cu, cv, stepU, stepV, touchesU && touchesV ? thickness * 1.3 : touchesU || touchesV ? thickness * 0.95 : thickness));
+    }
   }
   const isFloorLike = (face as Face) === 'floor';
   for (const neighbor of partialFaceNeighbors(layout, room, face)) {
@@ -938,6 +1006,21 @@ export function validateLayout(layout: ShipLayout, params: GeneratorParams): str
       const { normal, u, v } = faceAxes(opening.face);
       if (Math.abs(opening.center[normal] - room.min[normal]) > EPS && Math.abs(opening.center[normal] - room.min[normal] - room.size[normal]) > EPS) errors.push(`${opening.id}: detached from parent face`);
       if (opening.center[u] - opening.width / 2 < room.min[u] - EPS || opening.center[u] + opening.width / 2 > room.min[u] + room.size[u] + EPS || opening.center[v] - opening.height / 2 < room.min[v] - EPS || opening.center[v] + opening.height / 2 > room.min[v] + room.size[v] + EPS) errors.push(`${opening.id}: outside parent bounds`);
+    }
+  }
+  for (const object of layout.interior) {
+    const room = layout.rooms.find(r => r.id === object.roomId);
+    if (!room) errors.push(`${object.id}: missing parent`);
+  }
+  for (let i = 0; i < layout.exterior.length; i++) {
+    const object = layout.exterior[i];
+    const room = layout.rooms.find(r => r.id === object.roomId);
+    if (!room) { errors.push(`${object.id}: missing parent`); continue; }
+    const { normal, sign } = faceAxes(object.face);
+    const expected = faceCenter(room, object.face)[normal] + sign * object.size.y / 2;
+    if (Math.abs(object.center[normal] - expected) > EPS) errors.push(`${object.id}: detached from mounting face`);
+    for (let j = i + 1; j < layout.exterior.length; j++) {
+      if (boundsOverlap(boundsFromCenter(object.center, mountedWorldSize(object.face, object.size)), boundsFromCenter(layout.exterior[j].center, mountedWorldSize(layout.exterior[j].face, layout.exterior[j].size)))) errors.push(`${object.id} overlaps ${layout.exterior[j].id}`);
     }
   }
   return [...new Set(errors)];

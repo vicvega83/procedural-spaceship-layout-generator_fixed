@@ -330,7 +330,14 @@ interface ExteriorVisualProps { item: ExteriorObject; visible: boolean; wire: bo
 export function ExteriorVisual({ item, visible, wire }: ExteriorVisualProps) {
   if (!visible) return null;
   const { center, kind, size } = item;
-  return <group position={[center.x, center.y, center.z]} rotation={[0, item.rotation, 0]}>
+  const mountRotation: [number, number, number] = item.face === 'floor' ? [0, 0, Math.PI]
+    : item.face === 'east' ? [0, 0, -Math.PI / 2]
+    : item.face === 'west' ? [0, 0, Math.PI / 2]
+    : item.face === 'north' ? [-Math.PI / 2, 0, 0]
+    : item.face === 'south' ? [Math.PI / 2, 0, 0]
+    : [0, 0, 0];
+  return <group position={[center.x, center.y, center.z]} rotation={mountRotation}>
+    <group rotation={[0, item.rotation, 0]}>
     {kind === 'turret' && <>
       <mesh position={[0, 0.12, 0]}><cylinderGeometry args={[0.5, 0.65, 0.24, 8]} /><meshStandardMaterial color="#7b8a7b" metalness={0.7} roughness={0.4} /></mesh>
       <mesh position={[0, 0.46, 0]}><boxGeometry args={[0.65, 0.45, 0.85]} /><meshStandardMaterial color="#9d9f80" /></mesh>
@@ -374,5 +381,6 @@ export function ExteriorVisual({ item, visible, wire }: ExteriorVisualProps) {
       <mesh position={[0, 0.42, 0]}><boxGeometry args={[0.36, 0.04, 0.3]} /><meshStandardMaterial color="#c5eb91" emissive="#c5eb91" emissiveIntensity={0.5} /></mesh>
     </>}
     {wire && <mesh visible><boxGeometry args={[size.x, size.y, size.z]} /><meshBasicMaterial color="#b5d98e" wireframe /></mesh>}
+    </group>
   </group>;
 }
